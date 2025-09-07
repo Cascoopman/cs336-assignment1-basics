@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 from typing import BinaryIO
 import regex as re
 
@@ -27,10 +28,16 @@ def train_bpe_tokenizer(
                 Merges are ordered by order of creation.
     """
     # Initialize vocab with all possible bytes
-    vocab = dict(tuple[i.to_bytes(1), i] for i in range(256))
+    vocab = {i: i.to_bytes(1) for i in range(256)}
     
+    # Add special tokens to the vocab
+    for i, st in enumerate(special_tokens):
+        vocab[st] = i+255
+
+    merges = []
+
     # Get the pre-tokenization counts
-    counts = {}
+    pretoken_counts = {}
 
     with open(input_path, "rb") as f:
         num_processes = 4
@@ -41,27 +48,74 @@ def train_bpe_tokenizer(
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            counts += run_pretokenization(chunk)
-    
-    # Compute BPE merges
-    # TODO
 
+            # Run pre-tokenization on your chunk and store the counts for each pre-token
+            result = run_pretokenization(chunk, special_tokens)
+
+            pretoken_counts = dict(Counter(pretoken_counts) + Counter(result))
+    
+    for k, v in pretoken_counts.items():
+        if v > 20000:
+            print(repr(k), v)
+    
+    # TODO
+    quit()
 
     while len(vocab) <= vocab_size:
+
+        # Compute BPE merges
+        pair_counts = {}
         
-        pass
+        # Count all byte pairs
+        for pretoken, count in pretoken_counts:
+            for i in range(len(pretoken)-1):
+                pair_counts[set(pretoken[i], pretoken[i+1])] += count
+        
+        # Merge the most frequent pair, preferring lexographical greatest
+        merge_pair = max(pair_counts)
+        merges.add(merge_pair)
+
+        for token, count in pretoken_counts:
+            for i in range(len(token)-1):
+                if set(pretoken[i], pretoken[i+1]) == merge_pair:
+                    pretoken.pop(i)
+                    pretoken[i+1] = merge_pair
+
+        # Add it to the vocab
+        vocab[merge_pair] = len(vocab)
+
+        
+    return vocab, merges
 
 
-def run_pretokenization(chunk: str) -> list[str]:
-    """"""
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[bytes, int]:
+    """Use the GPT-2 regex-based pretokenizer to split chunks into pre-tokens and return the bytes.
+    
+    Args:
+        chunk (str): The piece of text that must be pre-tokenized
+        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
+            These strings will never be split into multiple tokens, and will always be
+            kept as a single token. If these special tokens occur in the `input_path`,
+            they are treated as any other string.
+
+    Returns:
+        counts (dict[bytes, int]): The mapping between the pre-tokens in bytes and their counts
+    """
+    ESC = "".join(re.escape(tok) for tok in special_tokens)
+
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""    
 
     counts = {}
 
-    for token in re.finditer(PAT, chunk):
-        counts[token] += 1
-    
+    # Split chunks into docs based on special tokens
+    for doc in re.split(ESC, chunk):
+        # Split docs into pretokens
+        for match in re.finditer(PAT, doc):
+            try:
+                counts[match.group(0)] += 1      
+            except KeyError:
+                counts[match.group(0)] = 1 
+
     return counts
 
 
@@ -113,9 +167,9 @@ def find_chunk_boundaries(
 
 
 if __name__ == "__main__":
-    vocab = train_bpe_tokenizer(
+    vocab, merges = train_bpe_tokenizer(
         input_path="data/TinyStoriesV2-GPT4-valid.txt",
-        vocab_size=500,
+        vocab_size=300,
         special_tokens=["<|endoftext|>"],
     )
-    print(vocab)
+    print("Vocab: ", vocab, "Merges: ", merges)
