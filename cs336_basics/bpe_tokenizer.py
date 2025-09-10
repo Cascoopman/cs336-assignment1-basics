@@ -1,7 +1,28 @@
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import BinaryIO
 import regex as re
+from bidict import bidict
+
+
+def replace_all_pairs_in_keys(d, merge_pair, new_id):
+    a, b = merge_pair
+    merged = defaultdict(int)
+
+    for key, count in d.items():
+        i = 0
+        new = []
+        while i < len(key):
+            if i + 1 < len(key) and key[i] == a and key[i + 1] == b:
+                new.append(new_id)
+                i += 2
+            else:
+                new.append(key[i])
+                i += 1
+        merged[tuple(new)] += count
+
+    return dict(merged)
+
 
 def train_bpe_tokenizer(
     input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
@@ -27,24 +48,23 @@ def train_bpe_tokenizer(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    # Initialize vocab with all possible bytes
-    vocab = {i: i.to_bytes(1) for i in range(256)}
+    # --- Initialize vocab ---
+    # Add all possible bytes
+    byte_range = 1 << 8
+    vocab = {i.to_bytes(1): i for i in range(byte_range)}
     
     # Add special tokens to the vocab
     for i, st in enumerate(special_tokens):
-        vocab[st] = i+255
+        vocab[st.encode()] = i + byte_range
 
-    merges = []
-
-    # Get the pre-tokenization counts
+    # --- Get the pre-tokenization counts ---
     pretoken_counts = {}
 
     with open(input_path, "rb") as f:
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
-        # The following is a serial implementation, but you can parallelize this
-        # by sending each start/end pair to a set of processes.
+        # TODO parallelize this by sending each start/end pair to a set of processes.
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
@@ -53,42 +73,47 @@ def train_bpe_tokenizer(
             result = run_pretokenization(chunk, special_tokens)
 
             pretoken_counts = dict(Counter(pretoken_counts) + Counter(result))
-    
+
+    # --- Compute BPE merges ---
+    merges = []
+
+    translated_counts = {}
+    # Translate to ID's
     for k, v in pretoken_counts.items():
-        if v > 20000:
-            print(repr(k), v)
-    
-    # TODO
-    quit()
+        group = tuple(b for b in k.encode())
+        translated_counts[group] = v
 
-    while len(vocab) <= vocab_size:
+    while len(vocab) < vocab_size:
+        pair_counts = defaultdict(int)
 
-        # Compute BPE merges
-        pair_counts = {}
-        
         # Count all byte pairs
-        for pretoken, count in pretoken_counts:
-            for i in range(len(pretoken)-1):
-                pair_counts[set(pretoken[i], pretoken[i+1])] += count
-        
-        # Merge the most frequent pair, preferring lexographical greatest
-        merge_pair = max(pair_counts)
-        merges.add(merge_pair)
+        for pretoken_ids, count in translated_counts.items():
+            for i in range(len(pretoken_ids)-1):
+                pair_counts[(pretoken_ids[i], pretoken_ids[i+1])] += count
 
-        for token, count in pretoken_counts:
-            for i in range(len(token)-1):
-                if set(pretoken[i], pretoken[i+1]) == merge_pair:
-                    pretoken.pop(i)
-                    pretoken[i+1] = merge_pair
+        # Merge the most frequent pair, preferring lexographical greatest
+        merge_pair = max(pair_counts, key=lambda k: (pair_counts[k], k))
+        merges.append(merge_pair)
 
         # Add it to the vocab
-        vocab[merge_pair] = len(vocab)
+        v = bidict(vocab)  # bytes -> id; v.inv is id -> bytes
+        def add_merge(v: bidict, a_id: int, b_id: int) -> int:
+            merged = v.inv[a_id] + v.inv[b_id]
+            if merged in v:
+                return v[merged]
+            new_id = (max(v.inv) + 1) if v else 0
+            vocab[merged] = new_id
+            return new_id
 
+        new_id = add_merge(v, merge_pair[0], merge_pair[1])
+
+        # Replace the merge pair tuples with single ID
+        translated_counts = replace_all_pairs_in_keys(translated_counts, merge_pair, new_id)
         
     return vocab, merges
 
 
-def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[bytes, int]:
+def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[str, int]:
     """Use the GPT-2 regex-based pretokenizer to split chunks into pre-tokens and return the bytes.
     
     Args:
@@ -105,16 +130,13 @@ def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[bytes, in
 
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""    
 
-    counts = {}
+    counts = defaultdict(int)
 
     # Split chunks into docs based on special tokens
     for doc in re.split(ESC, chunk):
         # Split docs into pretokens
         for match in re.finditer(PAT, doc):
-            try:
-                counts[match.group(0)] += 1      
-            except KeyError:
-                counts[match.group(0)] = 1 
+            counts[match.group(0)] += 1      
 
     return counts
 
@@ -172,4 +194,4 @@ if __name__ == "__main__":
         vocab_size=300,
         special_tokens=["<|endoftext|>"],
     )
-    print("Vocab: ", vocab, "Merges: ", merges)
+    print("Vocab: ", vocab, "\n"*2, "Merges: ", merges)
