@@ -1,5 +1,7 @@
+import json
 import os
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator
 from typing import BinaryIO
 import regex as re
 
@@ -62,7 +64,9 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[tuple[bytes], int]:
+def run_pretokenization(
+    chunk: str, special_tokens: list[str] | None = None
+) -> dict[tuple[bytes], int]:
     """Use the GPT-2 regex-based pretokenizer to split chunks into pre-tokens and return the bytes.
 
     Args:
@@ -200,10 +204,96 @@ def train_bpe_tokenizer(
     return vocab, merges
 
 
-if __name__ == "__main__":
-    vocab, merges = train_bpe_tokenizer(
-        input_path="data/TinyStoriesV2-GPT4-valid.txt",
-        vocab_size=300,
-        special_tokens=["<|endoftext|>"],
-    )
-    print("Vocab: ", vocab, "\n" * 2, "Merges: ", merges)
+def merge_token(token: str, merges: list[tuple[bytes, bytes]]) -> list[bytes]:
+    """Iteratively merges the byte pairs in the token"""
+    token_bytes = list(token.encode("utf-8"))
+
+    if len(token_bytes) == 1:
+        return token_bytes
+
+    for merge in merges:
+        a, b = merge
+
+        i = 0
+        while i < len(token_bytes) - 1:
+            first = token_bytes[i]
+            second = token_bytes[i + 1]
+            first = first.to_bytes(1) if isinstance(first, int) else first
+            second = second.to_bytes(1) if isinstance(second, int) else second
+
+            if first == a and second == b:
+                token_bytes = token_bytes[:i] + [a + b] + token_bytes[i + 2 :]
+            i += 1
+
+    return token_bytes
+
+
+class BytePairEncoder:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None,
+    ) -> None:
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = (special_tokens,)
+        return
+
+    def from_files(
+        cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None
+    ) -> "BytePairEncoder":
+        with open(vocab_filepath) as f:
+            vocab = json.load(f)
+        with open(merges_filepath) as f:
+            merges = [line for line in f.readline()]
+        return cls(vocab, merges, special_tokens)
+
+    def encode(
+        self,
+        text: str,
+    ) -> bytes:
+        """Encodes the input string using the vocab integers."""
+        if not self.special_tokens:
+            ESC = "".join(re.escape(tok) for tok in self.special_tokens)
+        else:
+            ESC = ""
+
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+        pretokens: list[str] = []
+        merged_pretoken_bytes: list[bytes] = []
+
+        # Split chunks into docs based on special tokens
+        for doc in re.split(ESC, text):
+            # Split docs into pretokens
+            for match in re.finditer(PAT, doc):
+                pretokens.append(match.group(0))
+
+        # Merge byte pairs and append result
+        for token in pretokens:
+            merged_token = merge_token(token=token, merges=self.merges)
+
+            for byte in merged_token:
+                merged_pretoken_bytes.append(byte)
+
+        inv_vocab = {v: k for k, v in self.vocab.items()}
+
+        encoded_pretokens = merged_pretoken_bytes
+        for i in range(len(encoded_pretokens)):
+            encoded_pretokens[i] = inv_vocab[
+                encoded_pretokens[i].to_bytes(1)
+                if isinstance(encoded_pretokens[i], int)
+                else encoded_pretokens[i]
+            ]
+        return encoded_pretokens
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for s in iterable:
+            yield from self.encode(s)
+
+    def decode(self, sequence: list[int]) -> str:
+        out: bytes = b""
+        for n in sequence:
+            out += self.vocab[n]
+        return out.decode("utf-8")
