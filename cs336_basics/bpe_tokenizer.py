@@ -15,6 +15,80 @@ def init_vocab(special_tokens: list[str]) -> dict[int, bytes]:
     return vocab
 
 
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+
+def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[tuple[bytes], int]:
+    """Use the GPT-2 regex-based pretokenizer to split chunks into pre-tokens and return the bytes.
+
+    Args:
+        chunk: The piece of text that must be pre-tokenized
+        special_tokens: A list of string special tokens to be added to the tokenizer vocabulary.
+            These tokens should not be split into multiple tokens. If these special tokens occur
+            in the `input_path`, they are treated as any other string.
+
+    Returns:
+        counts: The mapping between the pre-token strings and their counts
+    """
+    ESC = "".join(re.escape(tok) for tok in special_tokens)
+
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    counts = defaultdict(int)
+
+    # Split chunks into docs based on special tokens
+    for doc in re.split(ESC, chunk):
+        # Split docs into pretokens
+        for match in re.finditer(PAT, doc):
+            counts[tuple(match.group(0).encode("utf-8"))] += 1
+
+    return counts
+
+
 def get_pretokenization_counts(
     input_path: str | os.PathLike, special_tokens: list[str]
 ) -> dict[tuple[bytes], int]:
@@ -124,80 +198,6 @@ def train_bpe_tokenizer(
     merges = compute_merges(pretoken_counts=pretoken_counts, vocab=vocab, vocab_size=vocab_size)
 
     return vocab, merges
-
-
-def run_pretokenization(chunk: str, special_tokens: list[str]) -> dict[tuple[bytes], int]:
-    """Use the GPT-2 regex-based pretokenizer to split chunks into pre-tokens and return the bytes.
-
-    Args:
-        chunk: The piece of text that must be pre-tokenized
-        special_tokens: A list of string special tokens to be added to the tokenizer vocabulary.
-            These tokens should not be split into multiple tokens. If these special tokens occur
-            in the `input_path`, they are treated as any other string.
-
-    Returns:
-        counts: The mapping between the pre-token strings and their counts
-    """
-    ESC = "".join(re.escape(tok) for tok in special_tokens)
-
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
-    counts = defaultdict(int)
-
-    # Split chunks into docs based on special tokens
-    for doc in re.split(ESC, chunk):
-        # Split docs into pretokens
-        for match in re.finditer(PAT, doc):
-            counts[tuple(match.group(0).encode("utf-8"))] += 1
-
-    return counts
-
-
-def find_chunk_boundaries(
-    file: BinaryIO,
-    desired_num_chunks: int,
-    split_special_token: bytes,
-) -> list[int]:
-    """
-    Chunk the file into parts that can be counted independently.
-    May return fewer chunks if the boundaries end up overlapping.
-    """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
-
-    # Get total file size in bytes
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
-    file.seek(0)
-
-    chunk_size = file_size // desired_num_chunks
-
-    # Initial guesses for chunk boundary locations, uniformly spaced
-    # Chunks start on previous index, don't include last index
-    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
-    chunk_boundaries[-1] = file_size
-
-    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
-
-    for bi in range(1, len(chunk_boundaries) - 1):
-        initial_position = chunk_boundaries[bi]
-        file.seek(initial_position)  # Start at boundary guess
-        while True:
-            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
-
-            # If EOF, this boundary should be at the end of the file
-            if mini_chunk == b"":
-                chunk_boundaries[bi] = file_size
-                break
-
-            # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
-            if found_at != -1:
-                chunk_boundaries[bi] = initial_position + found_at
-                break
-            initial_position += mini_chunk_size
-
-    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
-    return sorted(set(chunk_boundaries))
 
 
 if __name__ == "__main__":
