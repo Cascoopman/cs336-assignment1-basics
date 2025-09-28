@@ -131,10 +131,10 @@ def get_pretokenization_counts(
     total_counts = defaultdict(int)
 
     with open(input_path, encoding="utf-8") as f:
-        for line in f:
-            chunk_counts = run_pretokenization(line.strip(), special_tokens)
-            for pretoken, count in chunk_counts.items():
-                total_counts[pretoken] += count
+        content = f.read()
+        chunk_counts = run_pretokenization(content, special_tokens)
+        for pretoken, count in chunk_counts.items():
+            total_counts[pretoken] += count
 
     return total_counts
 
