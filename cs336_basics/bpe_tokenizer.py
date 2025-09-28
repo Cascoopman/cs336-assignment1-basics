@@ -88,13 +88,14 @@ def run_pretokenization(
 
         for part in re.splititer(f"({special_tokens_pattern})", chunk):
             if part in special_tokens:
-                counts[tuple(part.encode("utf-8"))] += 1
+                # Keep special tokens as a single token
+                counts[(part.encode("utf-8"),)] += 1
             else:
                 for match in re.finditer(PAT, part):
-                    counts[tuple(match.group(0).encode("utf-8"))] += 1
+                    counts[tuple(bytes([b]) for b in match.group(0).encode("utf-8"))] += 1
     else:
         for match in re.finditer(PAT, chunk):
-            counts[tuple(match.group(0).encode("utf-8"))] += 1
+            counts[tuple(bytes([b]) for b in match.group(0).encode("utf-8"))] += 1
 
     return counts
 
