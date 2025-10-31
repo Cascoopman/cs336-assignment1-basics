@@ -1,9 +1,16 @@
 import json
 import os
+import time
+import tracemalloc
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from typing import BinaryIO
 import regex as re
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 
 def init_vocab(special_tokens: list[str]) -> dict[int, bytes]:
@@ -367,3 +374,168 @@ class BytePairEncoder:
         """
         for text in iterable:
             yield from self.encode(text)
+
+
+def measure_training_metrics(
+    input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str] | None = None,
+) -> dict:
+    """
+    Measure training time and memory usage for BPE tokenizer training.
+
+    Args:
+        input_path: Path to the input text file.
+        vocab_size: The desired vocabulary size.
+        special_tokens: A list of special tokens to include in the vocabulary.
+
+    Returns:
+        A dictionary containing:
+        - peak_memory_mb: Peak memory usage in MB
+        - peak_memory_gb: Peak memory usage in GB
+        - training_time_seconds: Training time in seconds
+        - training_time_hours: Training time in hours
+        - time_snapshots: Time taken for each stage
+        - memory_snapshots: Memory usage at different stages
+    """
+    if special_tokens is None:
+        special_tokens = []
+
+    # Initialize tracking
+    tracemalloc.start()
+    process = psutil.Process(os.getpid()) if PSUTIL_AVAILABLE else None
+
+    # Get baseline memory
+    memory_snapshots = {}
+    if process:
+        mem_baseline = process.memory_info().rss / (1024**2)  # MB
+        memory_snapshots['baseline'] = mem_baseline
+        peak_memory_mb = mem_baseline
+    else:
+        peak_memory_mb = 0
+
+    # Start timing
+    start_time = time.perf_counter()
+    time_snapshots = {}
+
+    # Training stages with memory and timing tracking
+    stage_start = time.perf_counter()
+    vocab = init_vocab(special_tokens)
+    vocab_init_time = time.perf_counter() - stage_start
+    time_snapshots['vocab_init'] = vocab_init_time
+    if process:
+        mem_after_vocab = process.memory_info().rss / (1024**2)
+        memory_snapshots['after_vocab_init'] = mem_after_vocab
+        peak_memory_mb = max(peak_memory_mb, mem_after_vocab)
+
+    stage_start = time.perf_counter()
+    pretoken_counts = get_pretokenization_counts(input_path, special_tokens)
+    pretokenization_time = time.perf_counter() - stage_start
+    time_snapshots['pretokenization'] = pretokenization_time
+    if process:
+        mem_after_pretoken = process.memory_info().rss / (1024**2)
+        memory_snapshots['after_pretokenization'] = mem_after_pretoken
+        peak_memory_mb = max(peak_memory_mb, mem_after_pretoken)
+
+    stage_start = time.perf_counter()
+    merges = compute_merges(pretoken_counts, vocab, vocab_size)
+    merges_time = time.perf_counter() - stage_start
+    time_snapshots['merges'] = merges_time
+    if process:
+        mem_after_merges = process.memory_info().rss / (1024**2)
+        memory_snapshots['after_merges'] = mem_after_merges
+        peak_memory_mb = max(peak_memory_mb, mem_after_merges)
+
+    end_time = time.perf_counter()
+    training_time_seconds = end_time - start_time
+
+    # Get tracemalloc peak
+    current, peak_tracemalloc = tracemalloc.get_traced_memory()
+    peak_tracemalloc_mb = peak_tracemalloc / (1024**2)
+    tracemalloc.stop()
+
+    result = {
+        'vocab': vocab,
+        'merges': merges,
+        'peak_memory_mb': peak_memory_mb,
+        'peak_memory_gb': peak_memory_mb / 1024,
+        'peak_tracemalloc_mb': peak_tracemalloc_mb,
+        'training_time_seconds': training_time_seconds,
+        'training_time_hours': training_time_seconds / 3600,
+        'time_snapshots': time_snapshots,
+        'memory_snapshots': memory_snapshots,
+    }
+
+    if process:
+        result['final_memory_mb'] = process.memory_info().rss / (1024**2)
+
+    return result
+
+if __name__ == "__main__":
+    VOCAB_SIZE = 10_000
+    SPECIAL_TOKENS = ["<|endoftext|>"]
+    INPUT_PATH = "/Users/caswork/Projects/Others/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+    OUTPUT_DIR = "output"
+
+    # Create output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Measure training metrics
+    print("Starting BPE tokenizer training...")
+    metrics = measure_training_metrics(
+        input_path=INPUT_PATH,
+        vocab_size=VOCAB_SIZE,
+        special_tokens=SPECIAL_TOKENS,
+    )
+
+    vocab = metrics['vocab']
+    merges = metrics['merges']
+
+    # Print metrics to console
+    print(f"\nTraining Metrics:")
+    print(f"  Total Training Time: {metrics['training_time_hours']:.4f} hours ({metrics['training_time_seconds']:.2f} seconds)")
+    print(f"  Peak Memory: {metrics['peak_memory_gb']:.2f} GB ({metrics['peak_memory_mb']:.2f} MB)")
+    if 'final_memory_mb' in metrics:
+        print(f"  Final Memory: {metrics['final_memory_mb']:.2f} MB")
+
+    print(f"\nTime per Stage:")
+    time_snapshots = metrics['time_snapshots']
+    total_stage_time = sum(time_snapshots.values())
+    for stage, stage_time in sorted(time_snapshots.items(), key=lambda x: x[1], reverse=True):
+        percentage = (stage_time / total_stage_time * 100) if total_stage_time > 0 else 0
+        print(f"  {stage}: {stage_time:.2f} seconds ({percentage:.1f}%)")
+
+    # Write vocab.txt as: index: <bytes as comma-separated hex strings>
+    vocab_path = os.path.join(OUTPUT_DIR, "vocab.txt")
+    with open(vocab_path, "w", encoding="utf-8") as f:
+        for k, v in vocab.items():
+            hex_str = ', '.join(f"{byte:02x}" for byte in v)
+            f.write(f"{k}: {hex_str}\n")
+    print(f"\nWrote vocabulary to: {vocab_path}")
+
+    # Write merges.txt as: <token1 as comma-separated hex>, <token2 as comma-separated hex>
+    merges_path = os.path.join(OUTPUT_DIR, "merges.txt")
+    with open(merges_path, "w", encoding="utf-8") as f:
+        for left, right in merges:
+            left_str = ', '.join(f"{byte:02x}" for byte in left)
+            right_str = ', '.join(f"{byte:02x}" for byte in right)
+            f.write(f"{left_str} {right_str}\n")
+    print(f"Wrote merges to: {merges_path}")
+
+    # Write metrics to JSON file
+    metrics_path = os.path.join(OUTPUT_DIR, "metrics.json")
+    metrics_output = {
+        'training_time_seconds': metrics['training_time_seconds'],
+        'training_time_hours': metrics['training_time_hours'],
+        'peak_memory_mb': metrics['peak_memory_mb'],
+        'peak_memory_gb': metrics['peak_memory_gb'],
+        'peak_tracemalloc_mb': metrics['peak_tracemalloc_mb'],
+        'time_snapshots': metrics['time_snapshots'],
+        'memory_snapshots': metrics['memory_snapshots'],
+    }
+    if 'final_memory_mb' in metrics:
+        metrics_output['final_memory_mb'] = metrics['final_memory_mb']
+
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics_output, f, indent=2)
+    print(f"Wrote metrics to: {metrics_path}")
