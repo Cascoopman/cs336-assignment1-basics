@@ -28,8 +28,16 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    from cs336_basics import transformer
 
-    raise NotImplementedError
+    linear = transformer.Linear(
+        in_features=d_in,
+        out_features=d_out,
+    )
+
+    torch.nn.Module.load_state_dict(self=transformer.Linear, state_dict=weights)
+
+    return linear.forward(x=in_features)
 
 
 def run_embedding(
