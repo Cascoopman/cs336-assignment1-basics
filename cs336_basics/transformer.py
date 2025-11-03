@@ -102,3 +102,29 @@ class RMSNorm(torch.nn.Module):
         result = normalized * self.gamma
 
         return result.to(in_dtype)
+
+
+class SwiGLU(torch.nn.Module):
+    def __init__(self, d_model: int, device: torch.device = None):
+        super().__init__()
+        self.d_model = d_model
+        self.d_ff = torch.round((8 * self.d_model / 3) / 64) * 64
+
+        tensor = torch.Tensor(self.d_ff, self.d_model, device=device)
+        stdev = math.sqrt(2 / (self.d_model + self.d_ff))
+
+        self.weights_1 = torch.nn.Parameter(
+            data=torch.nn.init.trunc_normal_(
+                tensor=tensor,
+                mean=0,
+                std=stdev,
+                a=-3 * abs(stdev),
+                b=3 * abs(stdev),
+            )
+        )
+        self.weights_3 = self.weights_1.copy_()
+
+        # TODO
+
+    def forward(self, x):
+        x = x * torch.sigmoid(x)
