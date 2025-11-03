@@ -472,9 +472,9 @@ def measure_training_metrics(
     return result
 
 if __name__ == "__main__":
-    VOCAB_SIZE = 10_000
+    VOCAB_SIZE = 32_000
     SPECIAL_TOKENS = ["<|endoftext|>"]
-    INPUT_PATH = "/Users/caswork/Projects/Others/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+    INPUT_PATH = "/Users/caswork/Projects/Others/cs336/cs336-assignment1-basics/data/owt_train.txt"
     OUTPUT_DIR = "output"
 
     # Create output directory if it doesn't exist
@@ -506,9 +506,11 @@ if __name__ == "__main__":
         print(f"  {stage}: {stage_time:.2f} seconds ({percentage:.1f}%)")
 
     # Write vocab.txt as: index: <bytes as comma-separated hex strings>
+    # Sort by byte count (length) first, then by token ID for consistent ordering
     vocab_path = os.path.join(OUTPUT_DIR, "vocab.txt")
     with open(vocab_path, "w", encoding="utf-8") as f:
-        for k, v in vocab.items():
+        sorted_vocab = sorted(vocab.items(), key=lambda x: (len(x[1]), x[0]))
+        for k, v in sorted_vocab:
             hex_str = ', '.join(f"{byte:02x}" for byte in v)
             f.write(f"{k}: {hex_str}\n")
     print(f"\nWrote vocabulary to: {vocab_path}")
