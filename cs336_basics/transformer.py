@@ -1,3 +1,4 @@
+import math
 import torch
 import einops
 
@@ -18,19 +19,19 @@ class Linear(torch.nn.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        tensor = torch.Tensor((self.in_features, self.out_features), device=device)
-        stdev = torch.sqrt(torch.Tensor(2) / (self.in_features + self.out_features))
+        tensor = torch.Tensor(self.out_features, self.in_features, device=device)
+        stdev = math.sqrt(2 / (self.in_features + self.out_features))
 
         self.weights = torch.nn.Parameter(
-            tensor=torch.nn.init.trunc_normal_(
+            data=torch.nn.init.trunc_normal_(
                 tensor=tensor,
                 mean=0,
                 std=stdev,
-                a=-3 * stdev,
-                b=3 * stdev,
+                a=-3 * abs(stdev),
+                b=3 * abs(stdev),
             )
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Apply the linear transformation to the input."""
-        return einops.einsum(x, self.weights, "... d_in, d_out d_in -> ... d_in")
+        return einops.einsum(token_ids, self.weights, "... d_in, d_out d_in -> ... d_out")

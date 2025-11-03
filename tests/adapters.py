@@ -35,9 +35,13 @@ def run_linear(
         out_features=d_out,
     )
 
-    torch.nn.Module.load_state_dict(self=transformer.Linear, state_dict=weights)
+    state_dict = {
+        "weights": weights,
+        }
 
-    return linear.forward(x=in_features)
+    linear.load_state_dict(state_dict=state_dict)
+
+    return linear.forward(token_ids=in_features)
 
 
 def run_embedding(
