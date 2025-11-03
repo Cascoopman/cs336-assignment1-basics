@@ -64,9 +64,41 @@ class Embedding(torch.nn.Module):
                 std=1,
                 a=-3,
                 b=3,
-                )
             )
+        )
 
     def forward(self, token_ids: torch.LongTensor) -> torch.Tensor:
         """Lookup the embedding vectors for the given token IDs."""
         return self.embedding[token_ids]
+
+
+class RMSNorm(torch.nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None) -> None:
+        """
+        Construct the RMSNorm module.
+
+        Args:
+            d_model: Hidden dimension of the model
+            eps: Epsilon value for numerical stability
+            device: Device to store the parameters on
+            dtype: Data type of the parameters
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.eps = eps
+        self.gamma = torch.nn.Parameter(data=torch.nn.init.ones_(tensor=torch.Tensor(self.d_model, device=device)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Process an input tensor of shape (batch_size, sequence_length, d_model) and return a
+        tensor of the same shape.
+        """
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+
+        rms = torch.sqrt(einops.reduce(x**2, "... d_in -> ... 1", "mean") + self.eps)
+        normalized = x / rms
+
+        result = normalized * self.gamma
+
+        return result.to(in_dtype)
