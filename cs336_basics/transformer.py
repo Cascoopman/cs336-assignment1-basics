@@ -35,3 +35,38 @@ class Linear(torch.nn.Module):
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Apply the linear transformation to the input."""
         return einops.einsum(token_ids, self.weights, "... d_in, d_out d_in -> ... d_out")
+
+
+class Embedding(torch.nn.Module):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        """Construct an embedding module.
+
+        Args:
+            num_embeddings: Size of the vocabulary
+            embedding_dim: Dimension of the embedding vectors, i.e., d_model
+            device: Device to store the parameters on
+            dtype: Data type of the parameters
+        """
+        super().__init__()
+        self.vocab_size = num_embeddings
+        self.d_model = embedding_dim
+
+        self.embedding = torch.nn.Parameter(
+            data=torch.nn.init.trunc_normal_(
+                tensor=torch.Tensor(num_embeddings, embedding_dim, device=device),
+                mean=0,
+                std=1,
+                a=-3,
+                b=3,
+                )
+            )
+
+    def forward(self, token_ids: torch.LongTensor) -> torch.Tensor:
+        """Lookup the embedding vectors for the given token IDs."""
+        return self.embedding[token_ids]
