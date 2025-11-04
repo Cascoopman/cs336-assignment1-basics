@@ -108,23 +108,29 @@ class SwiGLU(torch.nn.Module):
     def __init__(self, d_model: int, device: torch.device = None):
         super().__init__()
         self.d_model = d_model
-        self.d_ff = torch.round((8 * self.d_model / 3) / 64) * 64
+        self.d_ff = math.floor(((8 / 3) * self.d_model) / 64) * 64
 
-        tensor = torch.Tensor(self.d_ff, self.d_model, device=device)
-        stdev = math.sqrt(2 / (self.d_model + self.d_ff))
+        def trunc_init(shape):
+            t = torch.empty(shape, device=device)
+            std = math.sqrt(2 / (shape[0] + shape[1]))
+            return torch.nn.init.trunc_normal_(t, mean=0.0, std=std, a=-3 * std, b=3 * std)
 
-        self.weights_1 = torch.nn.Parameter(
-            data=torch.nn.init.trunc_normal_(
-                tensor=tensor,
-                mean=0,
-                std=stdev,
-                a=-3 * abs(stdev),
-                b=3 * abs(stdev),
-            )
-        )
-        self.weights_3 = self.weights_1.copy_()
+        self.w1 = torch.nn.Parameter(trunc_init((self.d_ff, self.d_model)).clone())
+        self.w3 = torch.nn.Parameter(trunc_init((self.d_ff, self.d_model)).clone())
+        self.w2 = torch.nn.Parameter(trunc_init((self.d_model, self.d_ff)).clone().contiguous())
 
-        # TODO
+    def forward(self, x: torch.Tensor):
+        # W1x
+        out = einops.einsum(self.w1, x, "d_ff d_model, ... d_model -> ... d_ff")
 
-    def forward(self, x):
-        x = x * torch.sigmoid(x)
+        # SiLU
+        out = einops.einsum(out, torch.sigmoid(out), "... d_ff, ... d_ff -> ... d_ff")
+
+        # W3x
+        lin = einops.einsum(self.w3, x, "d_ff d_model, ... d_model -> ... d_ff")
+
+        # element-wise
+        out = out * lin
+
+        # W2x
+        return einops.einsum(self.w2, out, "d_model d_ff, ... d_ff -> ... d_model")
